@@ -11,6 +11,8 @@
 //!   cargo run # no file: use a built-in test blip
 
 use std::io::{self, BufRead};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use beat_forge_core::{Frame, Sample, engine};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,6 +20,16 @@ use cpal::{FromSample, SizedSample};
 
 /// Number of overlapping sample instances allowed at once.
 const POLYPHONY: usize = 8;
+
+/// Stream event codes. cpal may invoke the error callback from the audio thread, so what
+/// happened travels to the control thread as a plain integer — see [`report_stream_error`].
+/// Only the distinctions the operator can act on are kept; the message text is dropped.
+const ERR_NONE: u32 = 0;
+const ERR_DEVICE_LOST: u32 = 1;
+const ERR_STREAM_INVALIDATED: u32 = 2;
+const ERR_DEVICE_CHANGED: u32 = 3;
+const ERR_XRUN: u32 = 4;
+const ERR_OTHER: u32 = 5;
 
 /// Frames rendered per pass inside the callback. cpal does not guarantee a fixed block
 /// length, so the buffer is preallocated at this size and longer blocks take several
@@ -46,11 +58,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Without resampling, a rate mismatch shifts the pitch. Resampling is a later step.
-    if sample.sample_rate != device_rate {
-        eprintln!(
-            "warning: sample is {} Hz but device is {} Hz — pitch will be off",
-            sample.sample_rate, device_rate
+    // The engine reads one source frame per output frame, so anything not at the device's
+    // rate would play at the wrong pitch. Converted here, once, off the audio thread.
+    let sample = sample.resample_to(device_rate);
+    if sample.source_sample_rate != sample.sample_rate {
+        println!(
+            "Resampled {} Hz -> {} Hz",
+            sample.source_sample_rate, sample.sample_rate
         );
     }
     if sample.source_channels > 2 {
@@ -61,18 +75,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     let (engine, mut trigger) = engine(sample, POLYPHONY);
+    let stream_error = Arc::new(AtomicU32::new(ERR_NONE));
 
     // Bound to the device's native sample format; the stream must stay alive below.
+    let errors = Arc::clone(&stream_error);
     let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => run::<f32>(&device, &config.into(), engine)?,
-        cpal::SampleFormat::I16 => run::<i16>(&device, &config.into(), engine)?,
-        cpal::SampleFormat::U16 => run::<u16>(&device, &config.into(), engine)?,
+        cpal::SampleFormat::F32 => run::<f32>(&device, &config.into(), engine, errors)?,
+        cpal::SampleFormat::I16 => run::<i16>(&device, &config.into(), engine, errors)?,
+        cpal::SampleFormat::U16 => run::<u16>(&device, &config.into(), engine, errors)?,
         other => anyhow::bail!("unsupported sample format: {other:?}"),
     };
 
     println!("Ready. Press Enter to trigger, type 'q' then Enter to quit.");
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
+        // This loop is blocked on stdin, so a stream failure surfaces on the next keypress
+        // rather than the moment it happens. A watcher thread would close that gap and is
+        // not worth it while the whole UI is one blocking read.
+        report_stream_error(&stream_error);
         match line?.trim() {
             "q" | "quit" => break,
             // Live input, so no timestamp worth honouring: fire as soon as possible and
@@ -118,10 +138,24 @@ fn write_frame<T: SizedSample + FromSample<f32>>(out: &mut [T], frame: Frame) {
     }
 }
 
+/// Print and clear whatever the audio thread reported, if anything.
+fn report_stream_error(errors: &AtomicU32) {
+    let message = match errors.swap(ERR_NONE, Ordering::Relaxed) {
+        ERR_NONE => return,
+        ERR_DEVICE_LOST => "output device went away — audio has stopped",
+        ERR_STREAM_INVALIDATED => "stream config is no longer valid — restart to recover",
+        ERR_DEVICE_CHANGED => "audio route changed; the stream was rerouted and kept playing",
+        ERR_XRUN => "buffer under/overrun — audio glitched",
+        _ => "the audio stream failed",
+    };
+    eprintln!("audio: {message}");
+}
+
 fn run<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut engine: beat_forge_core::Engine,
+    errors: Arc<AtomicU32>,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -131,7 +165,25 @@ where
 
     // Allocated on the control thread — never inside the callback.
     let mut scratch = vec![[0.0f32; 2]; SCRATCH_FRAMES];
-    let err_fn = |err| eprintln!("audio stream error: {err}");
+
+    // cpal may call this from the audio thread, where `eprintln!` would take the stderr lock
+    // and allocate — the one place in the project that still broke real-time discipline.
+    // Storing a code is wait-free; the control thread does the printing. Only the latest
+    // failure survives, which is all the operator can act on anyway.
+    let err_fn = move |err: cpal::Error| {
+        let code = match err.kind() {
+            cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::HostUnavailable => {
+                ERR_DEVICE_LOST
+            }
+            cpal::ErrorKind::StreamInvalidated => ERR_STREAM_INVALIDATED,
+            cpal::ErrorKind::DeviceChanged => ERR_DEVICE_CHANGED,
+            cpal::ErrorKind::Xrun => ERR_XRUN,
+            _ => ERR_OTHER,
+        };
+        // Latest wins: a burst of xruns collapses into one report, which is all the
+        // operator would act on anyway.
+        errors.store(code, Ordering::Relaxed);
+    };
 
     let stream = device.build_output_stream(
         *config,

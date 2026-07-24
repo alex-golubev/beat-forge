@@ -224,11 +224,6 @@ impl Engine {
             }
         }
     }
-
-    /// Sample rate the loaded sample was recorded at, in Hz.
-    pub fn sample_rate(&self) -> u32 {
-        self.sample.sample_rate
-    }
 }
 
 #[cfg(test)]
@@ -244,6 +239,7 @@ mod tests {
             frames,
             sample_rate: 48_000,
             source_channels,
+            source_sample_rate: 48_000,
         }
     }
 
