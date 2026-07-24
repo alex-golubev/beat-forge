@@ -1,8 +1,3 @@
-[package]
-name = "beat-forge"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-anyhow = "1"
-cpal = "0.18"
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/app"]

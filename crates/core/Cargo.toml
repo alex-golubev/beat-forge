@@ -1,0 +1,9 @@
+[package]
+name = "beat-forge-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+hound = "3.5"
+rtrb = "0.3"
