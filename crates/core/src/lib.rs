@@ -287,8 +287,21 @@ impl Engine {
     }
 
     fn start_voice(&mut self) {
-        // Voice stealing: when the pool is exhausted, slot 0 loses its note.
-        let slot = self.voices.iter().position(|v| !v.active).unwrap_or(0);
+        let slot = match self.voices.iter().position(|v| !v.active) {
+            Some(free) => free,
+            // Pool exhausted: steal whichever voice is furthest into the sample. For a
+            // decaying one-shot that is also the quietest, so it is both the least missed
+            // and the one whose abrupt restart makes the smallest discontinuity.
+            //
+            // `pos` stops being a valid proxy once voices can play different samples —
+            // comparing raw positions across lengths is meaningless.
+            None => self
+                .voices
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, v)| v.pos)
+                .map_or(0, |(i, _)| i),
+        };
         self.voices[slot].pos = 0;
         self.voices[slot].active = true;
     }
@@ -408,6 +421,29 @@ mod tests {
         let mut out = [[0.0; 2]; 1];
         eng.process(&mut out);
         assert_eq!(out, [[POLYPHONY as f32, POLYPHONY as f32]]);
+    }
+
+    #[test]
+    fn stealing_takes_the_oldest_voice_not_a_fixed_slot() {
+        // Built so that the oldest voice is *not* slot 0 — otherwise the old
+        // "always steal slot 0" policy would pass this test too.
+        let (mut eng, mut trig) = engine(sample(Frames::Mono(vec![1.0; 10])), 2);
+
+        assert!(trig.fire()); // -> slot 0
+        eng.process(&mut [[0.0; 2]; 3]);
+        assert!(trig.fire()); // -> slot 1
+        eng.process(&mut [[0.0; 2]; 8]); // slot 0 runs out and frees up here
+        assert!(trig.fire()); // -> slot 0 again, now the *fresh* one
+        eng.process(&mut [[0.0; 2]; 1]);
+
+        assert_eq!(eng.voices[0].pos, 1, "just started");
+        assert_eq!(eng.voices[1].pos, 9, "nearly finished");
+
+        // Pool is full: the near-finished voice must go, not the one that just started.
+        assert!(trig.fire());
+        eng.process(&mut [[0.0; 2]; 1]);
+        assert_eq!(eng.voices[0].pos, 2, "kept playing");
+        assert_eq!(eng.voices[1].pos, 1, "stolen and restarted");
     }
 
     #[test]

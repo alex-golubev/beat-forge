@@ -93,13 +93,24 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Mono devices get a fold-down, and anything past the first pair stays silent rather
 /// than duplicating the front channels into surrounds.
+///
+/// The clamp is not cosmetic: `FromSample` documents that it assumes `-1.0 <= s < 1.0` and
+/// "will overflow otherwise". Integer targets happen to saturate through an `as` cast, but
+/// that is an implementation detail — the 24-bit conversion builds its value unchecked, and
+/// an f32 device receives whatever it is given. The engine's bus has no gain staging yet, so
+/// two overlapping hits of a normalized sample already exceed the range; overs are the
+/// normal case here, not an anomaly. A real limiter replaces this in the mixer step.
 fn write_frame<T: SizedSample + FromSample<f32>>(out: &mut [T], frame: Frame) {
+    // Per channel, so a mono device folds down what a stereo device would actually hear.
+    let left = frame[0].clamp(-1.0, 1.0);
+    let right = frame[1].clamp(-1.0, 1.0);
+
     match out.len() {
         0 => {}
-        1 => out[0] = T::from_sample((frame[0] + frame[1]) * 0.5),
+        1 => out[0] = T::from_sample((left + right) * 0.5),
         _ => {
-            out[0] = T::from_sample(frame[0]);
-            out[1] = T::from_sample(frame[1]);
+            out[0] = T::from_sample(left);
+            out[1] = T::from_sample(right);
             for o in &mut out[2..] {
                 *o = T::from_sample(0.0);
             }
@@ -141,4 +152,63 @@ where
 
     stream.play()?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_device_gets_the_pair_untouched() {
+        let mut out = [0.0f32; 2];
+        write_frame(&mut out, [0.25, -0.5]);
+        assert_eq!(out, [0.25, -0.5], "must be transparent inside the range");
+    }
+
+    #[test]
+    fn overs_are_clamped_per_channel() {
+        let mut out = [0.0f32; 2];
+        write_frame(&mut out, [3.0, -7.0]);
+        assert_eq!(out, [1.0, -1.0]);
+    }
+
+    #[test]
+    fn mono_device_gets_a_fold_down() {
+        let mut out = [0.0f32; 1];
+        write_frame(&mut out, [1.0, 0.0]);
+        assert_eq!(out, [0.5]);
+    }
+
+    #[test]
+    fn mono_fold_down_cannot_escape_the_range() {
+        // Clamping happens per channel first, so the fold-down averages what a stereo
+        // device would actually have heard rather than the raw sum.
+        let mut out = [0.0f32; 1];
+        write_frame(&mut out, [4.0, 2.0]);
+        assert_eq!(out, [1.0]);
+    }
+
+    #[test]
+    fn channels_past_the_first_pair_stay_silent() {
+        let mut out = [9.0f32; 4];
+        write_frame(&mut out, [0.5, -0.5]);
+        assert_eq!(out, [0.5, -0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn zero_channels_is_a_no_op() {
+        let mut out: [f32; 0] = [];
+        write_frame(&mut out, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn integer_output_reaches_full_scale_without_wrapping() {
+        // Pins down the integer path, which the clamp alone does not change: an `as` cast
+        // already saturates. The clamp's value here is that the guarantee stops depending
+        // on that — `FromSample` documents the range as a precondition, and the 24-bit
+        // conversion it offers is genuinely unchecked.
+        let mut out = [0i16; 2];
+        write_frame(&mut out, [5.0, -5.0]);
+        assert_eq!(out, [i16::MAX, i16::MIN]);
+    }
 }
