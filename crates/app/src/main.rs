@@ -75,7 +75,13 @@ fn main() -> anyhow::Result<()> {
     for line in stdin.lock().lines() {
         match line?.trim() {
             "q" | "quit" => break,
-            _ => trigger.fire(),
+            // Live input, so no timestamp worth honouring: fire as soon as possible and
+            // accept block-boundary quantization rather than buying accuracy with latency.
+            _ => {
+                if !trigger.fire() {
+                    eprintln!("warning: command queue full — trigger dropped");
+                }
+            }
         }
     }
 
@@ -120,11 +126,10 @@ where
         *config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             // === AUDIO CALLBACK (real-time) ===
-            engine.pump();
             for block in output.chunks_mut(SCRATCH_FRAMES * channels) {
                 let frames = block.len() / channels;
                 let bus = &mut scratch[..frames];
-                engine.render(bus);
+                engine.process(bus);
                 for (out_frame, &frame) in block.chunks_mut(channels).zip(bus.iter()) {
                     write_frame(out_frame, frame);
                 }
