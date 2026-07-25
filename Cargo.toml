@@ -1,3 +1,14 @@
 [workspace]
 resolver = "3"
 members = ["crates/core", "crates/app"]
+
+# Declared here rather than passed on the command line, so the bar is the same for everyone
+# and does not depend on remembering flags. `warn`, not `deny`: a toolchain upgrade brings new
+# lints with it, and that should not break the build — enforcement is CI's job (`-D warnings`).
+[workspace.lints.rust]
+# The project contains no `unsafe` at all, so the strongest form is free.
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

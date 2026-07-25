@@ -2,6 +2,17 @@
 //!
 //! Nothing here runs under real-time constraints: loading happens on the control thread and
 //! is free to allocate and to fail. The engine only ever reads what this module produced.
+//!
+//! Resampling works in two number systems at once — sample indices, which are integers, and
+//! continuous positions and weights, which are not — and crosses between them on every output
+//! frame. `std` offers no lossless conversion for those pairs because none exists, so the cast
+//! lints are switched off here and only here; a cast appearing anywhere else in the workspace
+//! is still reported.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 
 use std::error::Error;
 use std::fmt;
@@ -35,10 +46,15 @@ pub enum DecodeError {
     /// where it is accurate, and this variant claims only what is actually known.
     #[error("could not read this as a WAV")]
     Unreadable(#[source] Box<dyn Error + Send + Sync>),
+    /// The header parsed but claims no channels, so there is no audio to read.
     #[error("WAV header declares zero channels")]
     NoChannels,
+    /// Bit depth outside 1..=32. Zero would underflow the scaling shift; above 32 is not a
+    /// depth `hound` produces.
     #[error("unsupported bit depth: {0} bits")]
     BitDepth(u16),
+    /// Sample rate outside `1000..=768_000`. The bounds exist because [`Sample::resample_to`]
+    /// scales length by `target / sample_rate`, and that field is untrusted.
     #[error("unsupported sample rate: {0} Hz")]
     SampleRate(u32),
 }
@@ -60,15 +76,21 @@ impl DecodeError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoadError {
+    /// The file could not be opened at all — missing, unreadable, not a file.
     #[error("opening {}", path.display())]
     Open {
+        /// The path that was asked for.
         path: PathBuf,
+        /// Why the operating system refused it.
         #[source]
         source: io::Error,
     },
+    /// The file opened, but its contents are not a sample this engine will load.
     #[error("decoding {}", path.display())]
     Decode {
+        /// The path that was asked for.
         path: PathBuf,
+        /// What the decoder rejected.
         #[source]
         source: DecodeError,
     },
@@ -136,6 +158,10 @@ const RESAMPLE_HALF_TAPS: f64 = 16.0;
 /// hundreds of gigabytes. Construction therefore goes through [`Sample::load_wav`],
 /// [`Sample::from_reader`] or [`Sample::blip`], and every accessor below returns a `Copy`
 /// scalar, so nothing can desync the data from its declared rate afterwards either.
+// `sample_rate` and `source_sample_rate` repeat the type's name, which clippy dislikes. In
+// audio "sample rate" is one indivisible term, and shortening it to `rate` would lose which
+// of the two rates is meant at every call site.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug)]
 pub struct Sample {
     pub(crate) frames: Frames,
@@ -200,8 +226,8 @@ impl Sample {
     /// [`DecodeError::Unreadable`] if the bytes are not a WAV the decoder accepts — a missing
     /// RIFF tag, a data chunk that ends early, a read failure underneath. Otherwise the header
     /// parsed but declares something that will not load: [`DecodeError::NoChannels`],
-    /// [`DecodeError::BitDepth`] outside 1..=32, or [`DecodeError::SampleRate`] outside
-    /// 1000..=768_000.
+    /// [`DecodeError::BitDepth`] outside `1..=32`, or [`DecodeError::SampleRate`] outside
+    /// `1000..=768_000`.
     pub fn from_reader(reader: impl Read) -> Result<Self, DecodeError> {
         let mut reader = hound::WavReader::new(reader).map_err(DecodeError::from_hound)?;
         let spec = reader.spec();
@@ -228,7 +254,9 @@ impl Sample {
                 .collect::<Result<_, _>>()
                 .map_err(DecodeError::from_hound)?,
             hound::SampleFormat::Int => {
-                let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
+                // A power of two, so `f32` holds it exactly at every depth up to 32 — and
+                // `powi` gets there without a lossy cast that would need excusing.
+                let scale = 2.0f32.powi(i32::from(spec.bits_per_sample) - 1);
                 reader
                     .samples::<i32>()
                     .map(|s| s.map(|v| v as f32 / scale))
@@ -237,7 +265,7 @@ impl Sample {
             }
         };
 
-        let channels = spec.channels as usize;
+        let channels = usize::from(spec.channels);
         let frames = if channels == 1 {
             Frames::Mono(raw)
         } else {
@@ -394,6 +422,12 @@ fn at<T: Copy + Default>(src: &[T], j: isize) -> T {
 
 #[cfg(test)]
 mod tests {
+    // Exact comparison is the point here, not an oversight: these fixtures are built from
+    // values the arithmetic reproduces bit for bit, and an epsilon would assert strictly less.
+    // Where a result is genuinely approximate — resampled audio — the tests below use a
+    // tolerance explicitly.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
     use hound::{SampleFormat, WavSpec, WavWriter};
     use std::io::Cursor;

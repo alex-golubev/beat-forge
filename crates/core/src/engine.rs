@@ -70,7 +70,9 @@ impl fmt::Debug for Engine {
             .field("polyphony", &self.voices.len())
             .field("pending", &self.pending.len())
             .field("sample", &self.sample)
-            .finish()
+            // `..` rather than `finish()`: the command queue is deliberately left out, and
+            // saying so is more honest than printing a complete-looking struct.
+            .finish_non_exhaustive()
     }
 }
 
@@ -159,7 +161,19 @@ impl Engine {
         loop {
             let next = self.next_event(self.frame + cursor as u64, block_end);
             let split = match next {
-                Some(at) => (at - self.frame) as usize,
+                Some(at) => {
+                    // `next_event` only returns frames below `block_end`, so this always fits
+                    // and `try_from` never takes the fallback. Written as a conversion that
+                    // can fail rather than a cast that cannot complain: the block length is a
+                    // safe answer if the invariant ever breaks, where a truncating cast would
+                    // silently render the wrong span and a panic would kill the audio thread.
+                    let offset = usize::try_from(at - self.frame).unwrap_or(out.len());
+                    debug_assert!(
+                        offset < out.len(),
+                        "event at {at} is outside the block ending at {block_end}"
+                    );
+                    offset
+                }
                 None => out.len(),
             };
             if split > cursor {
@@ -236,7 +250,7 @@ impl Engine {
         out.fill([0.0, 0.0]);
 
         let len = self.sample.frames.len();
-        for voice in self.voices.iter_mut() {
+        for voice in &mut self.voices {
             if !voice.active {
                 continue;
             }
@@ -268,6 +282,11 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    // The engine's arithmetic is exact — it sums and copies stored samples without scaling —
+    // so the expected buffers are compared bit for bit on purpose. Voice counts are small
+    // integers that `f32` holds exactly, so widening one to build an expectation loses nothing.
+    #![allow(clippy::float_cmp, clippy::cast_precision_loss)]
+
     use super::*;
 
     fn sample(frames: Frames) -> Sample {
@@ -334,7 +353,7 @@ mod tests {
     fn exhausted_pool_steals_instead_of_dropping() {
         const POLYPHONY: usize = 2;
         let (mut eng, mut trig) = engine(sample(Frames::Mono(vec![1.0; 8])), POLYPHONY);
-        for _ in 0..POLYPHONY + 1 {
+        for _ in 0..=POLYPHONY {
             assert!(trig.fire());
         }
 

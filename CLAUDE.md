@@ -118,6 +118,15 @@ beat drifts. This matters starting with the step-3 transport work.
   pure or consuming, and a `# Errors` section on anything returning `Result` naming the variants
   it can produce. `cargo doc -p beat-forge-core --no-deps` must stay warning-free — the modules
   are private, so prose refers to `sample.rs` in backticks rather than as an intra-doc link.
+- Lints live in `[workspace.lints]`, so the bar does not depend on remembering flags: `pedantic`,
+  `missing_docs`, and `unsafe_code = "forbid"` (the project has no `unsafe`, so the strongest form
+  is free). **`cargo clippy --all-targets` must report zero.** `warn` rather than `deny` —
+  enforcement is CI's job, and a toolchain upgrade should not break the build.
+- The cast lints are switched off in `sample.rs` and nowhere else: resampling crosses between
+  integer sample indices and continuous positions on every output frame, and `std` has no lossless
+  conversion for those pairs because none exists. Everywhere else a cast is still reported, and
+  the single one in `engine.rs` carries a `debug_assert` proving the value fits. Exact float
+  comparison is allowed inside test modules, where the arithmetic is reproducible bit for bit.
 - Errors split by crate, the usual Rust division: `core` is a library, so it returns typed
   errors (`DecodeError`, `LoadError` via `thiserror`) that a caller can branch on; `app` is the
   binary, so it uses `anyhow` and lets `?` widen those into it. `core` does not depend on

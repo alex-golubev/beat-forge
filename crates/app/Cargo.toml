@@ -7,3 +7,6 @@ edition = "2024"
 anyhow = "1"
 cpal = "0.18"
 beat-forge-core = { path = "../core" }
+
+[lints]
+workspace = true

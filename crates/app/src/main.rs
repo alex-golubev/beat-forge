@@ -48,15 +48,12 @@ fn main() -> anyhow::Result<()> {
     let device_rate = config.sample_rate();
     println!("Config: {config:?}");
 
-    let sample = match std::env::args().nth(1) {
-        Some(path) => {
-            println!("Loading {path}");
-            Sample::load_wav(path)?
-        }
-        None => {
-            println!("No file given — using a built-in test blip.");
-            Sample::blip(device_rate)
-        }
+    let sample = if let Some(path) = std::env::args().nth(1) {
+        println!("Loading {path}");
+        Sample::load_wav(path)?
+    } else {
+        println!("No file given — using a built-in test blip.");
+        Sample::blip(device_rate)
     };
 
     // The engine reads one source frame per output frame, so anything not at the device's
@@ -162,7 +159,7 @@ fn run<T>(
 where
     T: SizedSample + FromSample<f32>,
 {
-    let channels = config.channels as usize;
+    let channels = usize::from(config.channels);
     anyhow::ensure!(channels >= 1, "device reports zero output channels");
 
     // Allocated on the control thread — never inside the callback.
@@ -210,6 +207,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    // `write_frame` only clamps and copies, so every expected value here is reproduced bit for
+    // bit and exact comparison asserts more than a tolerance would.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
 
     #[test]
