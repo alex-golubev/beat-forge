@@ -1,0 +1,12 @@
+# Pinned to the channel, not to a version. What states the floor is `rust-version` in the
+# workspace manifest (1.85 — where edition 2024 landed, and what `cpal` itself asks for); a
+# floor cargo can check turns "requires rustc 1.85 or newer" into the error message, where an
+# unpinned old toolchain would instead fail to parse an edition it has never heard of.
+#
+# What this file adds is that `rustup` installs a toolchain at all, with the two components CI
+# runs, so a fresh clone does not have to be told either. An exact version would freeze the
+# toolchain as well, which is the opposite of the lints being `warn` rather than `deny`: a new
+# release bringing new lints is something to see, not something to keep out.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

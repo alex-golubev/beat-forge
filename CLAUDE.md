@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`beat-forge` is an early-stage DAW / groovebox (FL Studio direction: patterns and beats) written in
-Rust. It is built in deliberately small steps — a playable engine first, UI much later. Steps 1–2 of
+`beat-forge` is an early-stage DAW written in Rust. It is built in deliberately small steps — a
+playable engine first, UI much later. **What it grows into is not settled**: `docs/` sketches the
+possible directions, but those docs are local-only, and files that go into the repository must not
+claim an answer — that includes `README.md`, package `description` fields and this file. Steps 1–2 of
 the roadmap are done (sample playback with polyphony, Enter-key trigger), followed by a code-review
 pass whose findings have since been applied: typed errors, an encapsulated `Sample`, decoder test
 coverage and workspace-wide lints. Step 3 (transport/clock, BPM, sample-accurate position) is next,
@@ -36,7 +38,7 @@ While the app runs: Enter fires the sample, `q` + Enter quits.
 
 ## Architecture
 
-Cargo workspace (edition 2024, resolver 3) with two crates:
+Cargo workspace (edition 2024, resolver 3, Rust 1.85 or newer) with two crates:
 
 - **`crates/core`** (`beat-forge-core`) — the engine: audio, sequencing, DSP.
   Deps: `hound` (WAV), `rtrb` (lock-free queues), `thiserror` (typed errors).
@@ -91,7 +93,8 @@ temp-file cleanup.
 `from_reader` rejects sample rates outside `1000..=768_000`. That is not taste: `resample_to` scales
 length by `target / sample_rate`, and the header is untrusted, so a 1 Hz header turns a 39 KB file
 into a request for 192 GB, while a huge one widens the sinc kernel by the same factor. The range is
-deliberately far wider than anything musical — lo-fi material at 5512 Hz is what a groovebox is for.
+deliberately far wider than anything musical — lo-fi material at 5512 Hz is real, a 1 Hz header is
+not.
 
 `Sample`'s fields are private because the type carries that as an invariant: `sample_rate` is always
 one `resample_to` can safely scale by. Public fields would make the check that establishes it
@@ -124,8 +127,9 @@ optional, and a hand-built `Sample { sample_rate: 1, .. }` would walk straight p
 
 ## Conventions
 
-**Language.** Code comments, doc comments, and console/log output are **English**. Design docs in
-`docs/` are Russian; chat with the user is Russian.
+**Language.** Code comments, doc comments, and console/log output are **English**, and so is the
+root `README.md` — `docs/` is gitignored, which makes that file the project's only public
+description. Design docs in `docs/` are Russian; chat with the user is Russian.
 
 **Documentation.** Doc comments (`//!` at module level, `///` on public items) are used throughout
 `core` to explain *why* — especially real-time constraints. Match that density on new public API.
@@ -135,9 +139,14 @@ produce. `cargo doc -p beat-forge-core --no-deps` must stay warning-free; since 
 private, prose refers to `sample.rs` in backticks rather than as an intra-doc link.
 
 **Lints.** They live in `[workspace.lints]`, so the bar does not depend on remembering flags:
-`pedantic`, `missing_docs`, and `unsafe_code = "forbid"` (the project has no `unsafe`, so the
-strongest form is free). **`cargo clippy --all-targets` must report zero.** `warn` rather than
+`pedantic`, `cargo`, `missing_docs`, and `unsafe_code = "forbid"` (the project has no `unsafe`, so
+the strongest form is free). **`cargo clippy --all-targets` must report zero.** `warn` rather than
 `deny` — enforcement is CI's job, and a toolchain upgrade should not break the build.
+
+The `cargo` group is what keeps the package metadata from rotting, so a new crate has to carry the
+same fields as the existing two. Its one exception is `multiple_crate_versions`, allowed because
+every duplicate is transitive and arrives through `cpal` — leaving it on would mean a permanently
+non-zero baseline for a choice that is not ours to make.
 
 **Casts.** Only `sample.rs` switches the cast lints off, because it is the only module that works
 in two number systems at once — integer frame indices and continuous positions, times and weights —
@@ -166,3 +175,24 @@ real-time path returns no errors.
 boxes its cause as `Box<dyn Error + Send + Sync>` rather than naming `hound::Error`, so replacing the
 decoder (FLAC, AIFF) stays an implementation change instead of a breaking one. The same reasoning
 keeps `Frames` crate-private: public is reversible, private is not, so start closed.
+
+**Repository.** Shared package metadata is hoisted into `[workspace.package]` — version, edition,
+`rust-version`, license, repository, readme, keywords, categories — so a new crate inherits the
+answers instead of being asked them again; only `description` stays per-crate. There is no
+`[workspace.dependencies]`, because every dependency currently has exactly one consumer and
+hoisting one would buy nothing until a second crate wants it.
+
+`rust-version = "1.85"` is a fact, not a preference: edition 2024 stabilized there and `cpal`
+declares the same floor. `rust-toolchain.toml` pins the *channel* (`stable`) rather than a version,
+so a fresh clone gets a toolchain and the rustfmt/clippy components automatically while new
+releases still arrive — freezing a version would contradict the lints being `warn`.
+
+CI (`.github/workflows/ci.yml`) runs on Linux, macOS and Windows, because `cpal` compiles a
+different backend on each and only compiling proves nothing about the other two. It is the layer
+that makes the lints fatal (`-D warnings`, plus `RUSTDOCFLAGS`); `fail-fast` is off so one
+platform cannot hide the others. Formatting and docs run on Linux alone — they cannot differ by
+platform. Linux additionally installs `libasound2-dev`, since ALSA's headers are the one system
+dependency no runner image ships.
+
+Licensing is `MIT OR Apache-2.0`, the Rust ecosystem's default dual license, with both texts at
+the repository root.

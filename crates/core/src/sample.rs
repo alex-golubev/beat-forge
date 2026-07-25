@@ -240,7 +240,7 @@ impl Sample {
         // Both bounds exist because `resample_to` scales by `target / sample_rate`: a low rate
         // inflates the sample (1 Hz would ask for 48000x its own length), a high one widens the
         // resampling kernel by that same factor. The range is deliberately wider than anything
-        // musical — lo-fi material at 5512 Hz is what a groovebox is for, not a corrupt header.
+        // musical — lo-fi material at 5512 Hz is real material, unlike a 1 Hz header.
         if !(1_000..=768_000).contains(&spec.sample_rate) {
             return Err(DecodeError::SampleRate(spec.sample_rate));
         }

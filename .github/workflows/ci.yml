@@ -1,0 +1,64 @@
+# The manifest sets the lints to `warn` so that a toolchain upgrade cannot break a local build.
+# This is where they become fatal instead: `-D warnings` here is what "clippy must report zero"
+# actually means, and the same for rustdoc.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the state of the other two — `cpal` compiles a
+      # different backend on each, so their results are independent facts.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cpal` links against the system audio API. macOS has CoreAudio and Windows has WASAPI
+      # already; only ALSA's headers are missing from the runner image.
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      # rustup ships on every runner and honours `rust-toolchain.toml`, so the channel and the
+      # rustfmt/clippy components come from the repository rather than from this file.
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Formatting and documentation are platform-independent, so one runner settles them and
+      # the other two spend their time on the thing that actually differs — the audio backend.
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Docs
+        if: runner.os == 'Linux'
+        run: cargo doc -p beat-forge-core --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

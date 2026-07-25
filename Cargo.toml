@@ -2,6 +2,22 @@
 resolver = "3"
 members = ["crates/core", "crates/app"]
 
+# Hoisted so the two crates cannot drift apart on any of it — and so the UI crate that step 8
+# adds inherits the same answers instead of being asked them again. Only `description` stays
+# per-crate, because that is the one field where the engine and the binary differ.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Not a preference: edition 2024 stabilized in 1.85, and `cpal` declares the same floor. Saying
+# so is what turns a stale toolchain into "requires rustc 1.85 or newer" rather than a parse
+# error about an edition it has never heard of.
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alex-golubev/beat-forge"
+readme = "README.md"
+keywords = ["audio", "daw", "sampler", "playback", "real-time"]
+categories = ["multimedia::audio"]
+
 # Declared here rather than passed on the command line, so the bar is the same for everyone
 # and does not depend on remembering flags. `warn`, not `deny`: a toolchain upgrade brings new
 # lints with it, and that should not break the build — enforcement is CI's job (`-D warnings`).
@@ -12,3 +28,11 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Keeps the metadata above from rotting: every field this group asks for is one a consumer of
+# a published crate reads, and the group is the only thing that notices when one goes missing
+# again.
+cargo = { level = "warn", priority = -1 }
+# The one lint in that group nothing here can act on. Every duplicate is transitive and
+# arrives through `cpal` — `thiserror` 1 and 2, `syn` 2 and 3, `jni-sys` — so the choice is not
+# ours to make, and leaving it on would mean a permanently non-zero baseline.
+multiple_crate_versions = "allow"
