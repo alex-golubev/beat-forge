@@ -4,6 +4,7 @@
 //! is free to allocate and to fail. The engine only ever reads what this module produced.
 
 use std::error::Error;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -90,6 +91,21 @@ pub(crate) enum Frames {
     Stereo(Vec<Frame>),
 }
 
+/// Layout and length, never the samples themselves.
+///
+/// `#[derive(Debug)]` would be actively harmful here: a 250 ms blip prints as 60 KB of
+/// floats, and a three-minute stereo track as hundreds of megabytes — enough to bury the
+/// assertion message that asked for it.
+impl fmt::Debug for Frames {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let layout = match self {
+            Frames::Mono(_) => "Mono",
+            Frames::Stereo(_) => "Stereo",
+        };
+        write!(f, "{layout}({} frames)", self.len())
+    }
+}
+
 impl Frames {
     /// Number of frames, independent of channel layout.
     pub fn len(&self) -> usize {
@@ -120,6 +136,7 @@ const RESAMPLE_HALF_TAPS: f64 = 16.0;
 /// hundreds of gigabytes. Construction therefore goes through [`Sample::load_wav`],
 /// [`Sample::from_reader`] or [`Sample::blip`], and every accessor below returns a `Copy`
 /// scalar, so nothing can desync the data from its declared rate afterwards either.
+#[derive(Debug)]
 pub struct Sample {
     pub(crate) frames: Frames,
     pub(crate) sample_rate: u32,
@@ -403,10 +420,9 @@ mod tests {
         Sample::from_reader(Cursor::new(bytes))
     }
 
-    /// The error a decode is expected to fail with. `.err().expect(..)` rather than
-    /// `.expect_err(..)`: the latter needs `Sample: Debug`, which it does not implement yet.
+    /// The error a decode is expected to fail with.
     fn decode_err(bytes: Vec<u8>, why: &str) -> DecodeError {
-        decode(bytes).err().expect(why)
+        decode(bytes).expect_err(why)
     }
 
     fn stereo_data(s: &Sample) -> &[Frame] {

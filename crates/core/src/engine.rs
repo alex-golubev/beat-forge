@@ -4,6 +4,8 @@
 //! [`Trigger`], which is the control thread's only way in. No allocation, no locks, no I/O
 //! past this line — state that the engine needs is preallocated when it is built.
 
+use std::fmt;
+
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{Frame, Frames, Sample};
@@ -49,9 +51,45 @@ pub struct Engine {
     frame: u64,
 }
 
+/// Summarises the state an engine is usually inspected for, not its storage.
+///
+/// Written out rather than derived because two of the fields print badly: the voice pool is
+/// mostly idle slots, and `rtrb`'s `Debug` dumps pointers and cache padding. Formatting never
+/// happens inside the audio callback, so nothing here is bound by real-time rules.
+///
+/// The cost of writing it out is that a field added later is not picked up automatically —
+/// the transport arriving in step 3 will want its position listed here too.
+impl fmt::Debug for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Engine")
+            .field("frame", &self.frame)
+            .field(
+                "active_voices",
+                &self.voices.iter().filter(|v| v.active).count(),
+            )
+            .field("polyphony", &self.voices.len())
+            .field("pending", &self.pending.len())
+            .field("sample", &self.sample)
+            .finish()
+    }
+}
+
 /// Control-side handle used to trigger the sample from another thread.
 pub struct Trigger {
     tx: Producer<Command>,
+}
+
+/// Reports the one thing worth knowing: whether the queue is backing up.
+///
+/// `rtrb`'s own `Debug` prints the ring buffer's pointers, cache padding and `PhantomData`,
+/// which says nothing about whether triggers are getting through.
+impl fmt::Debug for Trigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Trigger")
+            .field("free_slots", &self.tx.slots())
+            .field("capacity", &COMMAND_CAPACITY)
+            .finish()
+    }
 }
 
 impl Trigger {

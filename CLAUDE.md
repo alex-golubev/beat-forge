@@ -102,10 +102,11 @@ beat drifts. This matters starting with the step-3 transport work.
   bool was added to prevent, one floor down. Unreachable while the queue drains fully every block;
   becomes reachable once the sequencer (step 4) schedules events ahead of time, and wants the same
   kind of fix then.
-- No public type implements `Debug` (`Sample`, `Frames`, `Engine`, `Trigger`), which Rust API
-  Guidelines C-DEBUG asks for. It already bites: `expect_err` needs `T: Debug`, so the decoder
-  tests use `is_err()` instead. Deriving it on `Frames` is the wrong fix — a failing assert would
-  dump millions of floats — so it wants a manual impl that prints layout and length.
+- `Debug` on `Frames`, `Engine` and `Trigger` is written out rather than derived, because all
+  three hold something that prints badly: a PCM buffer worth tens of megabytes, and `rtrb`
+  queues whose own `Debug` is pointers and cache padding. The cost is that a new field is not
+  picked up automatically — the step-3 transport will have to be added to `Engine`'s impl by
+  hand. `Sample` derives, so it does not have this problem.
 
 ## Conventions
 
