@@ -16,7 +16,7 @@ mod engine;
 mod sample;
 
 pub use engine::{Engine, Trigger, engine};
-pub use sample::Sample;
+pub use sample::{DecodeError, LoadError, Sample};
 
 /// Storage layout, shared with [`engine`] but not published: see [`sample::Frames`].
 pub(crate) use sample::Frames;

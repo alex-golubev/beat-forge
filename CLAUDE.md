@@ -40,7 +40,7 @@ Cargo workspace (edition 2024, resolver 3) with two crates:
   internals either, so how PCM is stored (`Frames`) is crate-private. A UI wants a peak
   envelope it can draw, not a buffer it has to reduce itself — publishing the layout would pin
   it to whatever the first consumer did with it. Deps: `hound` (WAV), `rtrb` (lock-free
-  queues), `anyhow`.
+  queues), `thiserror` (typed errors).
 - **`crates/app`** (`beat-forge` binary) — thin host layer: opens the `cpal` device, builds the
   output stream, reads stdin. Deps: `cpal`, `beat-forge-core`.
 
@@ -113,4 +113,10 @@ beat drifts. This matters starting with the step-3 transport work.
   Russian; chat with the user is Russian.
 - Doc comments (`//!` at module level, `///` on public items) are used throughout `core` to explain
   *why* — especially real-time constraints. Match that density on new public API.
-- `anyhow::Result` for fallible setup/loading paths; the real-time path returns no errors.
+- Errors split by crate, the usual Rust division: `core` is a library, so it returns typed
+  errors (`DecodeError`, `LoadError` via `thiserror`) that a caller can branch on; `app` is the
+  binary, so it uses `anyhow` and lets `?` widen those into it. `core` does not depend on
+  `anyhow` at all. The real-time path returns no errors.
+- A dependency's type never appears in a public signature. `DecodeError::Unreadable` boxes its
+  cause as `Box<dyn Error + Send + Sync>` rather than naming `hound::Error`, so replacing the
+  decoder (FLAC, AIFF) stays an implementation change instead of a breaking one.

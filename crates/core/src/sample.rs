@@ -3,13 +3,75 @@
 //! Nothing here runs under real-time constraints: loading happens on the control thread and
 //! is free to allocate and to fail. The engine only ever reads what this module produced.
 
+use std::error::Error;
 use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::Path;
-
-use anyhow::Context;
+use std::io::{self, BufReader, Read};
+use std::path::{Path, PathBuf};
 
 use crate::Frame;
+
+/// What can go wrong turning a byte stream into a [`Sample`].
+///
+/// Separate from [`LoadError`] because [`Sample::from_reader`] opens no files and so cannot
+/// fail the way [`Sample::load_wav`] can — folding both into one enum would mean a variant
+/// that is unreachable for half its callers.
+///
+/// The decoder's own failure carries its cause as a boxed [`Error`] rather than naming
+/// `hound::Error`. Putting a dependency's type in a public signature makes that dependency
+/// part of this crate's contract: swapping the decoder — for FLAC or AIFF support, say —
+/// would then be a breaking change forced by an implementation detail. Callers that really
+/// want the concrete type can still `downcast_ref` for it; they just do it at their own risk
+/// instead of on our promise.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DecodeError {
+    /// The decoder rejected the stream. The `source` carries the specific reason.
+    ///
+    /// Deliberately not split into "corrupt file" and "I/O failure": `hound` reports a
+    /// missing RIFF tag, a data chunk that ends early and a genuine read failure all as its
+    /// own `IoError`, and the only thing separating them is the message text. Classifying on
+    /// that would be a guess dressed up as a type, so the reason stays in the cause chain
+    /// where it is accurate, and this variant claims only what is actually known.
+    #[error("could not read this as a WAV")]
+    Unreadable(#[source] Box<dyn Error + Send + Sync>),
+    #[error("WAV header declares zero channels")]
+    NoChannels,
+    #[error("unsupported bit depth: {0} bits")]
+    BitDepth(u16),
+    #[error("unsupported sample rate: {0} Hz")]
+    SampleRate(u32),
+}
+
+impl DecodeError {
+    /// Box a `hound` failure as the cause of [`DecodeError::Unreadable`].
+    ///
+    /// The one place that sees the concrete type, and where it stops: boxing it here is what
+    /// keeps `hound` out of this crate's public signatures.
+    fn from_hound(err: hound::Error) -> Self {
+        Self::Unreadable(Box::new(err))
+    }
+}
+
+/// What can go wrong loading a [`Sample`] from a path.
+///
+/// Both variants carry the path: by the time this reaches a user, *which* file failed is the
+/// first thing they need, and the underlying `io::Error` does not carry it.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LoadError {
+    #[error("opening {}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("decoding {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: DecodeError,
+    },
+}
 
 /// Decoded PCM, kept in its source channel layout.
 ///
@@ -86,12 +148,18 @@ impl Sample {
     ///
     /// Files with more than two channels are truncated to the first two; a correct
     /// surround downmix needs per-format coefficients and is not worth it yet.
-    pub fn load_wav(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn load_wav(path: impl AsRef<Path>) -> Result<Self, LoadError> {
         let path = path.as_ref();
         // Opening is ours now rather than hound's, so the path has to be put back into the
         // error — a bare "No such file or directory" names nothing the operator can act on.
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        Self::from_reader(BufReader::new(file))
+        let file = File::open(path).map_err(|source| LoadError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_reader(BufReader::new(file)).map_err(|source| LoadError::Decode {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     /// Decode a WAV from any reader — the parsing half of [`Sample::load_wav`].
@@ -100,36 +168,38 @@ impl Sample {
     /// part worth testing exhaustively: a reader can be a `Cursor` over bytes, so those tests
     /// need no filesystem, no temporary files and no cleanup. It also leaves room for material
     /// that never was a file on its own — a sample pack read out of an archive.
-    pub fn from_reader(reader: impl Read) -> anyhow::Result<Self> {
-        let mut reader = hound::WavReader::new(reader)?;
+    pub fn from_reader(reader: impl Read) -> Result<Self, DecodeError> {
+        let mut reader = hound::WavReader::new(reader).map_err(DecodeError::from_hound)?;
         let spec = reader.spec();
 
         // Untrusted input: a corrupt header must surface as an error, never a panic.
         // `bits_per_sample == 0` in particular would underflow the shift below.
-        anyhow::ensure!(spec.channels >= 1, "WAV header declares zero channels");
-        anyhow::ensure!(
-            (1..=32).contains(&spec.bits_per_sample),
-            "unsupported bit depth: {} bits",
-            spec.bits_per_sample
-        );
+        if spec.channels == 0 {
+            return Err(DecodeError::NoChannels);
+        }
+        if !(1..=32).contains(&spec.bits_per_sample) {
+            return Err(DecodeError::BitDepth(spec.bits_per_sample));
+        }
         // Both bounds exist because `resample_to` scales by `target / sample_rate`: a low rate
         // inflates the sample (1 Hz would ask for 48000x its own length), a high one widens the
         // resampling kernel by that same factor. The range is deliberately wider than anything
         // musical — lo-fi material at 5512 Hz is what a groovebox is for, not a corrupt header.
-        anyhow::ensure!(
-            (1_000..=768_000).contains(&spec.sample_rate),
-            "unsupported sample rate: {} Hz",
-            spec.sample_rate
-        );
+        if !(1_000..=768_000).contains(&spec.sample_rate) {
+            return Err(DecodeError::SampleRate(spec.sample_rate));
+        }
 
         let raw: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
+            hound::SampleFormat::Float => reader
+                .samples::<f32>()
+                .collect::<Result<_, _>>()
+                .map_err(DecodeError::from_hound)?,
             hound::SampleFormat::Int => {
                 let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
                 reader
                     .samples::<i32>()
                     .map(|s| s.map(|v| v as f32 / scale))
-                    .collect::<Result<_, _>>()?
+                    .collect::<Result<_, _>>()
+                    .map_err(DecodeError::from_hound)?
             }
         };
 
@@ -329,8 +399,14 @@ mod tests {
         })
     }
 
-    fn decode(bytes: Vec<u8>) -> anyhow::Result<Sample> {
+    fn decode(bytes: Vec<u8>) -> Result<Sample, DecodeError> {
         Sample::from_reader(Cursor::new(bytes))
+    }
+
+    /// The error a decode is expected to fail with. `.err().expect(..)` rather than
+    /// `.expect_err(..)`: the latter needs `Sample: Debug`, which it does not implement yet.
+    fn decode_err(bytes: Vec<u8>, why: &str) -> DecodeError {
+        decode(bytes).err().expect(why)
     }
 
     fn stereo_data(s: &Sample) -> &[Frame] {
@@ -409,21 +485,20 @@ mod tests {
     fn a_sample_rate_below_the_range_is_rejected() {
         // Not a taste call: `resample_to` scales length by `target / sample_rate`, so a 1 Hz
         // header turns a 39 KB file into a request for 192 GB.
-        // `.err().expect(..)` rather than `.expect_err(..)`: the latter needs `Sample: Debug`,
-        // which it does not implement yet.
-        let err = decode(int_wav(1, 1, 16, &[0; 8]))
-            .err()
-            .expect("a 1 Hz header must not load");
-        assert!(
-            err.to_string().contains("sample rate"),
-            "unexpected error: {err}"
-        );
+        let err = decode_err(int_wav(1, 1, 16, &[0; 8]), "a 1 Hz header must not load");
+        // Matches the variant, not the message: the reason is now part of the type, so
+        // rewording the text can no longer quietly turn this into a test of nothing.
+        assert!(matches!(err, DecodeError::SampleRate(1)), "got {err:?}");
     }
 
     #[test]
     fn a_sample_rate_above_the_range_is_rejected() {
         // The other end costs CPU rather than memory: the kernel widens as 1/ratio.
-        assert!(decode(int_wav(1, 4_000_000, 16, &[0; 8])).is_err());
+        let err = decode_err(int_wav(1, 4_000_000, 16, &[0; 8]), "4 MHz must not load");
+        assert!(
+            matches!(err, DecodeError::SampleRate(4_000_000)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -440,14 +515,16 @@ mod tests {
 
     #[test]
     fn garbage_is_an_error_rather_than_a_panic() {
-        assert!(decode(b"NOTAWAVFILEATALL".to_vec()).is_err());
+        let err = decode_err(b"NOTAWAVFILEATALL".to_vec(), "garbage must not load");
+        assert!(matches!(err, DecodeError::Unreadable(_)), "got {err:?}");
     }
 
     #[test]
     fn a_truncated_file_is_an_error_rather_than_a_panic() {
         let mut bytes = int_wav(1, 44_100, 16, &[100, 200, 300]);
         bytes.truncate(bytes.len() - 3);
-        assert!(decode(bytes).is_err());
+        let err = decode_err(bytes, "a truncated file must not load");
+        assert!(matches!(err, DecodeError::Unreadable(_)), "got {err:?}");
     }
 
     fn mono(data: Vec<f32>, rate: u32) -> Sample {

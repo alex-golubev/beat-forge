@@ -49,9 +49,9 @@ dependencies = [
 name = "beat-forge-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "hound",
  "rtrb",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
