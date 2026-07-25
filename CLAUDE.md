@@ -24,7 +24,7 @@ cargo build                    # build the whole workspace
 cargo check -p beat-forge-core # fast type-check of the engine crate alone
 cargo clippy --all-targets
 cargo fmt
-cargo test                     # 27 unit tests (20 in core, 7 in app)
+cargo test                     # 38 unit tests (31 in core, 7 in app)
 cargo test -p beat-forge-core <name>   # run a single test by name substring
 ```
 
@@ -46,7 +46,10 @@ Everything is organized around separating the **real-time audio thread** from **
 (UI, file loading, control logic). They communicate only through **lock-free SPSC queues** (`rtrb`),
 never mutexes. The module layout follows the same split: `sample.rs` loads and owns audio data on
 the control thread, `engine.rs` renders it under real-time constraints, `lib.rs` holds the shared
-`Frame` type and the re-exports. The pair returned by `engine()`:
+`Frame` type and the re-exports. Loading splits once more: `load_wav` only opens the file and hands
+a reader to `from_reader`, so the decoder — the half that faces untrusted input — is exercised over
+an in-memory `Cursor`, with no fixture files and no temp-file cleanup. The pair returned by
+`engine()`:
 
 - `Engine` lives inside the cpal audio callback. `process(&mut [Frame])` advances one block: it
   drains the command queue into a preallocated `pending` list, then renders the block as a series of
@@ -79,18 +82,24 @@ beat drifts. This matters starting with the step-3 transport work.
   current amplitude, and the stolen voice is the quietest one, so it is a soft tick rather than a
   crack. A proper fade needs per-voice gain with a ramp — i.e. the mixer, step 5.
 - Resampling happens once at load (`Sample::resample_to`, a windowed sinc on the control thread),
-  so the engine can assume its material is always at the device rate. Two consequences: changing the
-  output device mid-session would leave the sample converted for the old rate (unreachable today —
-  the stream is built once at startup), and per-voice pitch, when it arrives, is a *separate*
-  mechanism — a cheap RT interpolator for a musical effect, not a second copy of this one.
+  so the engine can assume its material is always at the device rate. Three consequences: changing
+  the output device mid-session would leave the sample converted for the old rate (unreachable
+  today — the stream is built once at startup); per-voice pitch, when it arrives, is a *separate*
+  mechanism — a cheap RT interpolator for a musical effect, not a second copy of this one; and
+  `load_wav` rejects sample rates outside `1000..=768_000`, because resampling scales length by
+  `target / sample_rate` and that field is untrusted — a 1 Hz header turns a 39 KB file into a
+  request for 192 GB, while a huge one widens the sinc kernel by the same factor. The range is
+  deliberately far wider than anything musical: lo-fi material at 5512 Hz is what a groovebox is
+  for.
 - `collect_commands` in `engine.rs` drops a scheduled event silently if `pending` is already at
   `PENDING_CAPACITY` — the same "lost note, no signal" problem that `Trigger::fire`'s `#[must_use]`
   bool was added to prevent, one floor down. Unreachable while the queue drains fully every block;
   becomes reachable once the sequencer (step 4) schedules events ahead of time, and wants the same
   kind of fix then.
-- `Sample::load_wav` has no test coverage — it parses untrusted input but nothing exercises the
-  mono/stereo/corrupt-header/bit-depth paths. Needs small WAV fixtures. The rest of `core` and the
-  host's `write_frame` are covered.
+- No public type implements `Debug` (`Sample`, `Frames`, `Engine`, `Trigger`), which Rust API
+  Guidelines C-DEBUG asks for. It already bites: `expect_err` needs `T: Debug`, so the decoder
+  tests use `is_err()` instead. Deriving it on `Frames` is the wrong fix — a failing assert would
+  dump millions of floats — so it wants a manual impl that prints layout and length.
 
 ## Conventions
 

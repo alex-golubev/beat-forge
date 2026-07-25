@@ -3,7 +3,11 @@
 //! Nothing here runs under real-time constraints: loading happens on the control thread and
 //! is free to allocate and to fail. The engine only ever reads what this module produced.
 
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
+
+use anyhow::Context;
 
 use crate::Frame;
 
@@ -58,7 +62,21 @@ impl Sample {
     /// Files with more than two channels are truncated to the first two; a correct
     /// surround downmix needs per-format coefficients and is not worth it yet.
     pub fn load_wav(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let mut reader = hound::WavReader::open(path)?;
+        let path = path.as_ref();
+        // Opening is ours now rather than hound's, so the path has to be put back into the
+        // error — a bare "No such file or directory" names nothing the operator can act on.
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        Self::from_reader(BufReader::new(file))
+    }
+
+    /// Decode a WAV from any reader — the parsing half of [`Sample::load_wav`].
+    ///
+    /// Split out because decoding is the part that faces untrusted input, and therefore the
+    /// part worth testing exhaustively: a reader can be a `Cursor` over bytes, so those tests
+    /// need no filesystem, no temporary files and no cleanup. It also leaves room for material
+    /// that never was a file on its own — a sample pack read out of an archive.
+    pub fn from_reader(reader: impl Read) -> anyhow::Result<Self> {
+        let mut reader = hound::WavReader::new(reader)?;
         let spec = reader.spec();
 
         // Untrusted input: a corrupt header must surface as an error, never a panic.
@@ -69,9 +87,14 @@ impl Sample {
             "unsupported bit depth: {} bits",
             spec.bits_per_sample
         );
+        // Both bounds exist because `resample_to` scales by `target / sample_rate`: a low rate
+        // inflates the sample (1 Hz would ask for 48000x its own length), a high one widens the
+        // resampling kernel by that same factor. The range is deliberately wider than anything
+        // musical — lo-fi material at 5512 Hz is what a groovebox is for, not a corrupt header.
         anyhow::ensure!(
-            spec.sample_rate > 0,
-            "WAV header declares a zero sample rate"
+            (1_000..=768_000).contains(&spec.sample_rate),
+            "unsupported sample rate: {} Hz",
+            spec.sample_rate
         );
 
         let raw: Vec<f32> = match spec.sample_format {
@@ -240,6 +263,167 @@ fn at<T: Copy + Default>(src: &[T], j: isize) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hound::{SampleFormat, WavSpec, WavWriter};
+    use std::io::Cursor;
+
+    /// Encode a WAV in memory. Everything below decodes bytes rather than files, so the
+    /// loader's untrusted-input paths can be exercised without touching the filesystem.
+    fn wav(spec: WavSpec, write: impl FnOnce(&mut WavWriter<&mut Cursor<Vec<u8>>>)) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        let mut writer = WavWriter::new(&mut cursor, spec).expect("spec is writable");
+        write(&mut writer);
+        writer.finalize().expect("finalize");
+        cursor.into_inner()
+    }
+
+    fn int_wav(channels: u16, rate: u32, bits: u16, samples: &[i32]) -> Vec<u8> {
+        let spec = WavSpec {
+            channels,
+            sample_rate: rate,
+            bits_per_sample: bits,
+            sample_format: SampleFormat::Int,
+        };
+        wav(spec, |w| {
+            for &s in samples {
+                w.write_sample(s).expect("write");
+            }
+        })
+    }
+
+    fn float_wav(channels: u16, rate: u32, samples: &[f32]) -> Vec<u8> {
+        let spec = WavSpec {
+            channels,
+            sample_rate: rate,
+            bits_per_sample: 32,
+            sample_format: SampleFormat::Float,
+        };
+        wav(spec, |w| {
+            for &s in samples {
+                w.write_sample(s).expect("write");
+            }
+        })
+    }
+
+    fn decode(bytes: Vec<u8>) -> anyhow::Result<Sample> {
+        Sample::from_reader(Cursor::new(bytes))
+    }
+
+    fn stereo_data(s: &Sample) -> &[Frame] {
+        match &s.frames {
+            Frames::Stereo(d) => d,
+            Frames::Mono(_) => panic!("expected stereo"),
+        }
+    }
+
+    #[test]
+    fn sixteen_bit_mono_reaches_full_scale_without_exceeding_it() {
+        let s = decode(int_wav(
+            1,
+            44_100,
+            16,
+            &[i32::from(i16::MAX), 0, i32::from(i16::MIN)],
+        ))
+        .expect("valid file");
+        let d = mono_data(&s);
+        assert!((d[0] - 1.0).abs() < 1e-4, "peak positive: {}", d[0]);
+        assert_eq!(d[1], 0.0);
+        assert_eq!(d[2], -1.0, "the negative rail is exactly -1.0");
+        assert_eq!(s.sample_rate, 44_100);
+        assert_eq!(s.source_channels, 1);
+    }
+
+    #[test]
+    fn eight_bit_arrives_signed() {
+        // WAV stores 8-bit PCM *unsigned* with a 128 bias; hound removes it. If that ever
+        // stopped being true, silence would decode as full-scale positive.
+        let s = decode(int_wav(1, 22_050, 8, &[127, 0, -128])).expect("valid file");
+        let d = mono_data(&s);
+        assert!(d[0] > 0.99, "peak positive: {}", d[0]);
+        assert_eq!(d[1], 0.0, "silence must stay silence, not +1.0");
+        assert_eq!(d[2], -1.0);
+    }
+
+    #[test]
+    fn twenty_four_bit_uses_the_full_depth() {
+        // Guards the `1 << (bits - 1)` scale: a wrong shift here still "works" but quietly
+        // loads everything 256x too loud or too quiet.
+        let s = decode(int_wav(1, 48_000, 24, &[8_388_607, 0, -8_388_608])).expect("valid file");
+        let d = mono_data(&s);
+        assert!((d[0] - 1.0).abs() < 1e-6, "peak positive: {}", d[0]);
+        assert_eq!(d[2], -1.0);
+    }
+
+    #[test]
+    fn float_samples_pass_through_untouched() {
+        let s = decode(float_wav(1, 48_000, &[0.25, -0.5, 0.0])).expect("valid file");
+        assert_eq!(mono_data(&s), [0.25, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn stereo_is_deinterleaved_not_flattened() {
+        let s = decode(float_wav(2, 48_000, &[1.0, -1.0, 0.5, -0.5])).expect("valid file");
+        assert_eq!(stereo_data(&s), [[1.0, -1.0], [0.5, -0.5]]);
+        assert_eq!(s.source_channels, 2);
+    }
+
+    #[test]
+    fn extra_channels_are_truncated_to_the_first_pair() {
+        let s = decode(float_wav(4, 48_000, &[0.1, 0.2, 0.3, 0.4])).expect("valid file");
+        assert_eq!(
+            stereo_data(&s),
+            [[0.1, 0.2]],
+            "surround channels are dropped"
+        );
+        assert_eq!(
+            s.source_channels, 4,
+            "the original count survives so the host can warn"
+        );
+    }
+
+    #[test]
+    fn a_sample_rate_below_the_range_is_rejected() {
+        // Not a taste call: `resample_to` scales length by `target / sample_rate`, so a 1 Hz
+        // header turns a 39 KB file into a request for 192 GB.
+        // `.err().expect(..)` rather than `.expect_err(..)`: the latter needs `Sample: Debug`,
+        // which it does not implement yet.
+        let err = decode(int_wav(1, 1, 16, &[0; 8]))
+            .err()
+            .expect("a 1 Hz header must not load");
+        assert!(
+            err.to_string().contains("sample rate"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_sample_rate_above_the_range_is_rejected() {
+        // The other end costs CPU rather than memory: the kernel widens as 1/ratio.
+        assert!(decode(int_wav(1, 4_000_000, 16, &[0; 8])).is_err());
+    }
+
+    #[test]
+    fn the_bounds_themselves_still_load() {
+        // The range has to stay wide enough for real material — vintage lo-fi at the bottom,
+        // exotic high-rate gear at the top. Pins the edges against a careless tightening.
+        for rate in [1_000, 5_512, 8_363, 44_100, 48_000, 192_000, 768_000] {
+            assert!(
+                decode(int_wav(1, rate, 16, &[0; 8])).is_ok(),
+                "{rate} Hz is legitimate material and must load"
+            );
+        }
+    }
+
+    #[test]
+    fn garbage_is_an_error_rather_than_a_panic() {
+        assert!(decode(b"NOTAWAVFILEATALL".to_vec()).is_err());
+    }
+
+    #[test]
+    fn a_truncated_file_is_an_error_rather_than_a_panic() {
+        let mut bytes = int_wav(1, 44_100, 16, &[100, 200, 300]);
+        bytes.truncate(bytes.len() - 3);
+        assert!(decode(bytes).is_err());
+    }
 
     fn mono(data: Vec<f32>, rate: u32) -> Sample {
         Sample {
