@@ -1,8 +1,9 @@
-//! Step 2 — load a WAV and trigger it in real time.
+//! The host layer: opens the cpal output device and bridges the outside world to the engine.
 //!
-//! Wires the beat-forge engine into a cpal output stream and fires the sample on every
-//! Enter press. This is where control-thread -> audio-thread messaging first appears:
-//! the keyboard loop pushes triggers over a lock-free queue that the audio callback drains.
+//! Loads a sample, resamples it to the device rate, then runs the audio stream and fires the
+//! sample on every Enter press. This is where control-thread -> audio-thread messaging lives:
+//! the keyboard loop pushes triggers over a lock-free queue that the audio callback drains,
+//! and stream errors travel back the other way through an atomic.
 //!
 //! The engine renders a stereo bus; this layer owns the mapping onto the device's channels.
 //!

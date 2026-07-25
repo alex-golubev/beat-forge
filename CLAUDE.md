@@ -12,9 +12,8 @@ place: the engine counts frames and can schedule an event on an exact one.
 
 Design docs live in `docs/` (written in Russian, and **gitignored** — they are local-only):
 `roadmap.md` (step plan), `architecture.md` (decisions + library stack), `language-choice.md`,
-`ui-and-tauri.md` (UI-layer tradeoffs), `code-review-step2.md` (the step-2 review: what was fixed,
-how, and what is still open). Read `docs/roadmap.md` before starting feature work — it defines what
-"the next step" means and records what each completed step actually shipped.
+`ui-and-tauri.md` (UI-layer tradeoffs). Read `docs/roadmap.md` before starting feature work — it
+defines what "the next step" means and records what each completed step actually shipped.
 
 ## Commands
 
@@ -84,6 +83,14 @@ beat drifts. This matters starting with the step-3 transport work.
   output device mid-session would leave the sample converted for the old rate (unreachable today —
   the stream is built once at startup), and per-voice pitch, when it arrives, is a *separate*
   mechanism — a cheap RT interpolator for a musical effect, not a second copy of this one.
+- `collect_commands` in `engine.rs` drops a scheduled event silently if `pending` is already at
+  `PENDING_CAPACITY` — the same "lost note, no signal" problem that `Trigger::fire`'s `#[must_use]`
+  bool was added to prevent, one floor down. Unreachable while the queue drains fully every block;
+  becomes reachable once the sequencer (step 4) schedules events ahead of time, and wants the same
+  kind of fix then.
+- `Sample::load_wav` has no test coverage — it parses untrusted input but nothing exercises the
+  mono/stereo/corrupt-header/bit-depth paths. Needs small WAV fixtures. The rest of `core` and the
+  host's `write_frame` are covered.
 
 ## Conventions
 
