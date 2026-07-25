@@ -3,16 +3,13 @@
 //! Nothing here runs under real-time constraints: loading happens on the control thread and
 //! is free to allocate and to fail. The engine only ever reads what this module produced.
 //!
-//! Resampling works in two number systems at once — sample indices, which are integers, and
-//! continuous positions and weights, which are not — and crosses between them on every output
-//! frame. `std` offers no lossless conversion for those pairs because none exists, so the cast
-//! lints are switched off here and only here; a cast appearing anywhere else in the workspace
-//! is still reported.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+//! This is the one module that works in two number systems at once — sample indices, which are
+//! integers, and continuous positions, times and weights, which are not — so it is the one
+//! module that has to cross between them. `std` offers no lossless conversion for those pairs
+//! because none exists, and the cast lints are switched off exactly where a crossing happens:
+//! per function, with a reason, never file-wide. They are `expect` rather than `allow`, so an
+//! allowance that stops being needed reports itself instead of quietly outliving the code that
+//! earned it. A cast anywhere else in the workspace is still reported.
 
 use std::error::Error;
 use std::fmt;
@@ -257,9 +254,17 @@ impl Sample {
                 // A power of two, so `f32` holds it exactly at every depth up to 32 — and
                 // `powi` gets there without a lossy cast that would need excusing.
                 let scale = 2.0f32.powi(i32::from(spec.bits_per_sample) - 1);
+                // Past 24 bits the value no longer fits an `f32` mantissa and the conversion
+                // rounds. That is the storage format's ceiling rather than a decision made
+                // here: `Frames` is `f32`, which is what the engine mixes.
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "f32 PCM cannot hold more than 24 bits of an i32 sample"
+                )]
+                let normalize = |v: i32| v as f32 / scale;
                 reader
                     .samples::<i32>()
-                    .map(|s| s.map(|v| v as f32 / scale))
+                    .map(|s| s.map(normalize))
                     .collect::<Result<_, _>>()
                     .map_err(DecodeError::from_hound)?
             }
@@ -297,6 +302,12 @@ impl Sample {
     /// same code the anti-alias filter, for free.
     #[must_use = "resampling consumes the sample and returns a new one; \
                   dropping the result loses the audio"]
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "crosses between frame indices and continuous positions; see the module doc"
+    )]
     pub fn resample_to(self, target_rate: u32) -> Self {
         if target_rate == 0 || target_rate == self.sample_rate {
             return self;
@@ -353,13 +364,19 @@ impl Sample {
     /// without a real audio file on hand.
     #[must_use]
     pub fn blip(sample_rate: u32) -> Self {
-        let len = sample_rate as usize / 4; // 250 ms
         let freq = 220.0;
-        let frames = (0..len)
+        // Counted in `u32` and timed in `f64` so that both conversions are `From` rather than
+        // casts: only the final narrowing to the `f32` the buffer stores is unavoidable, and
+        // rounding a value already inside [-1, 1] to f32 is exactly what storing it does.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the buffer is f32; the value is already inside [-1, 1]"
+        )]
+        let frames = (0..sample_rate / 4) // 250 ms
             .map(|i| {
-                let t = i as f32 / sample_rate as f32;
+                let t = f64::from(i) / f64::from(sample_rate);
                 let decay = (-t * 12.0).exp();
-                (t * freq * std::f32::consts::TAU).sin() * decay * 0.4
+                ((t * freq * std::f64::consts::TAU).sin() * decay * 0.4) as f32
             })
             .collect();
         Self {
@@ -377,6 +394,11 @@ impl Sample {
 ///
 /// Weights are normalized by their own sum rather than scaled by `cutoff`: it costs one
 /// division and makes a constant input come out exactly constant at any fractional phase.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "crosses between frame indices and continuous positions; see the module doc"
+)]
 fn kernel(pos: f64, half: f64, cutoff: f64, window: &mut Vec<(isize, f32)>) {
     window.clear();
 
@@ -427,6 +449,10 @@ mod tests {
     // Where a result is genuinely approximate — resampled audio — the tests below use a
     // tolerance explicitly.
     #![allow(clippy::float_cmp)]
+    // Fixtures are generated the same way the resampler consumes them — an index turned into a
+    // time, a computed value stored as f32 — so they cross between number systems for the same
+    // reason the code under test does.
+    #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
     use super::*;
     use hound::{SampleFormat, WavSpec, WavWriter};

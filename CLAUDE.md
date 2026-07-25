@@ -139,13 +139,23 @@ private, prose refers to `sample.rs` in backticks rather than as an intra-doc li
 strongest form is free). **`cargo clippy --all-targets` must report zero.** `warn` rather than
 `deny` — enforcement is CI's job, and a toolchain upgrade should not break the build.
 
-**Casts.** The cast lints are switched off in `sample.rs` and nowhere else: resampling crosses
-between integer sample indices and continuous positions on every output frame, and `std` has no
-lossless conversion for those pairs because none exists. Everywhere else a cast is still reported.
-Prefer the conversion that can fail — `usize::from`, `usize::try_from` with a sane fallback — over
-one that cannot complain; `process` does exactly that where it turns an event's frame offset into an
-index. Exact float comparison is allowed inside test modules, where the arithmetic is reproducible
-bit for bit.
+**Casts.** Only `sample.rs` switches the cast lints off, because it is the only module that works
+in two number systems at once — integer frame indices and continuous positions, times and weights —
+and `std` has no lossless conversion for those pairs because none exists. The allowance is per
+function with a `reason`, never file-wide, and it is `#[expect]` rather than `#[allow]`: an
+expectation that stops firing is itself a warning, so a stale exemption cannot outlive the code that
+earned it. Everywhere else a cast is still reported.
+
+Reach for the cast last. Prefer `From` (`usize::from`, `f64::from`) and choose the index type that
+makes it apply — `Sample::blip` counts in `u32` and times in `f64` for exactly that reason. Failing
+that, prefer the conversion that *can* fail, `usize::try_from` with a sane fallback, over one that
+cannot complain; `Engine::process` does that where it turns an event's frame offset into an index.
+What is left after that is genuinely irreducible: float↔integer in either direction, `f64` narrowed
+to the `f32` a buffer stores, and `usize`/`u64`, which have no `From` in either direction.
+
+Exact float comparison is allowed inside test modules, where the arithmetic is reproducible bit for
+bit; `sample.rs`'s tests also allow casts, since a fixture is built by crossing the same two number
+systems as the code it checks.
 
 **Errors.** Split by crate, the usual Rust division: `core` is a library, so it returns typed errors
 (`DecodeError`, `LoadError` via `thiserror`) that a caller can branch on; `app` is the binary, so it
