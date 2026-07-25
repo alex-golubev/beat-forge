@@ -9,8 +9,9 @@
 //! The internal bus is stereo: [`Engine::process`] always produces [`Frame`]s whatever the
 //! source layout. Mapping that pair onto the output device is the host layer's job.
 //!
-//! The same split runs through the module layout: [`sample`] loads and owns audio data on
-//! the control thread, [`engine`] renders it under real-time constraints.
+//! The same split runs through the module layout: `sample.rs` loads and owns audio data on
+//! the control thread, `engine.rs` renders it under real-time constraints. Both modules are
+//! private — what the crate offers is re-exported below, and nothing else is reachable.
 
 mod engine;
 mod sample;
@@ -18,7 +19,8 @@ mod sample;
 pub use engine::{Engine, Trigger, engine};
 pub use sample::{DecodeError, LoadError, Sample};
 
-/// Storage layout, shared with [`engine`] but not published: see [`sample::Frames`].
+/// Storage layout, shared with `engine.rs` but deliberately not published — see `Frames`
+/// itself for why the UI must not depend on how PCM is laid out.
 pub(crate) use sample::Frames;
 
 /// One stereo frame: `[left, right]`.

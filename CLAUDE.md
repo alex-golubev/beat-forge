@@ -114,6 +114,10 @@ beat drifts. This matters starting with the step-3 transport work.
   Russian; chat with the user is Russian.
 - Doc comments (`//!` at module level, `///` on public items) are used throughout `core` to explain
   *why* — especially real-time constraints. Match that density on new public API.
+- New public API carries what the Rust API Guidelines ask for: `Debug`, `#[must_use]` on anything
+  pure or consuming, and a `# Errors` section on anything returning `Result` naming the variants
+  it can produce. `cargo doc -p beat-forge-core --no-deps` must stay warning-free — the modules
+  are private, so prose refers to `sample.rs` in backticks rather than as an intra-doc link.
 - Errors split by crate, the usual Rust division: `core` is a library, so it returns typed
   errors (`DecodeError`, `LoadError` via `thiserror`) that a caller can branch on; `app` is the
   binary, so it uses `anyhow` and lets `?` widen those into it. `core` does not depend on

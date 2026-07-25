@@ -116,6 +116,7 @@ impl Trigger {
 /// Create an [`Engine`] and its paired [`Trigger`] handle.
 ///
 /// `polyphony` is the number of overlapping sample instances allowed at once.
+#[must_use = "the engine and its trigger are the only handles to the sample just consumed"]
 pub fn engine(sample: Sample, polyphony: usize) -> (Engine, Trigger) {
     let (tx, rx) = RingBuffer::new(COMMAND_CAPACITY);
     let voices = (0..polyphony.max(1))
@@ -137,6 +138,7 @@ pub fn engine(sample: Sample, polyphony: usize) -> (Engine, Trigger) {
 impl Engine {
     /// Frames rendered since the engine was created — the timebase everything schedules
     /// against. Counted in frames, never derived from an OS timer, so it cannot drift.
+    #[must_use]
     pub fn frame(&self) -> u64 {
         self.frame
     }

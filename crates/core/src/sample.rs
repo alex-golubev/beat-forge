@@ -146,17 +146,20 @@ pub struct Sample {
 
 impl Sample {
     /// Sample rate the data is *currently* at, in Hz — after any resampling.
+    #[must_use]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
     /// Channel count of the source file, kept only so the host can warn about material that
     /// was reduced on load.
+    #[must_use]
     pub fn source_channels(&self) -> u16 {
         self.source_channels
     }
 
     /// Sample rate of the source file, kept only so the host can report a conversion.
+    #[must_use]
     pub fn source_sample_rate(&self) -> u32 {
         self.source_sample_rate
     }
@@ -165,6 +168,12 @@ impl Sample {
     ///
     /// Files with more than two channels are truncated to the first two; a correct
     /// surround downmix needs per-format coefficients and is not worth it yet.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::Open`] if the file cannot be opened, and [`LoadError::Decode`] wrapping
+    /// whatever [`Sample::from_reader`] rejected. Both carry the path, which the underlying
+    /// `io::Error` does not.
     pub fn load_wav(path: impl AsRef<Path>) -> Result<Self, LoadError> {
         let path = path.as_ref();
         // Opening is ours now rather than hound's, so the path has to be put back into the
@@ -185,6 +194,14 @@ impl Sample {
     /// part worth testing exhaustively: a reader can be a `Cursor` over bytes, so those tests
     /// need no filesystem, no temporary files and no cleanup. It also leaves room for material
     /// that never was a file on its own — a sample pack read out of an archive.
+    ///
+    /// # Errors
+    ///
+    /// [`DecodeError::Unreadable`] if the bytes are not a WAV the decoder accepts — a missing
+    /// RIFF tag, a data chunk that ends early, a read failure underneath. Otherwise the header
+    /// parsed but declares something that will not load: [`DecodeError::NoChannels`],
+    /// [`DecodeError::BitDepth`] outside 1..=32, or [`DecodeError::SampleRate`] outside
+    /// 1000..=768_000.
     pub fn from_reader(reader: impl Read) -> Result<Self, DecodeError> {
         let mut reader = hound::WavReader::new(reader).map_err(DecodeError::from_hound)?;
         let spec = reader.spec();
@@ -250,6 +267,8 @@ impl Sample {
     /// fold everything above the target Nyquist back into the audible band, right where
     /// cymbals keep their energy. Lowering the kernel's cutoff along with the ratio makes the
     /// same code the anti-alias filter, for free.
+    #[must_use = "resampling consumes the sample and returns a new one; \
+                  dropping the result loses the audio"]
     pub fn resample_to(self, target_rate: u32) -> Self {
         if target_rate == 0 || target_rate == self.sample_rate {
             return self;
@@ -304,6 +323,7 @@ impl Sample {
 
     /// Synthesize a short percussive blip (a decaying sine) so the engine can be tested
     /// without a real audio file on hand.
+    #[must_use]
     pub fn blip(sample_rate: u32) -> Self {
         let len = sample_rate as usize / 4; // 250 ms
         let freq = 220.0;
