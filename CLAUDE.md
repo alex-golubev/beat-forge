@@ -36,7 +36,11 @@ Cargo workspace (edition 2024, resolver 3) with two crates:
 
 - **`crates/core`** (`beat-forge-core`) — the engine: audio, sequencing, DSP. **Must never know
   anything about UI.** This is a hard rule, not a preference: it keeps the eventual UI choice
-  (egui vs Tauri) reversible. Deps: `hound` (WAV), `rtrb` (lock-free queues), `anyhow`.
+  (egui vs Tauri) reversible. It has a second edge: nothing outside may depend on core's
+  internals either, so how PCM is stored (`Frames`) is crate-private. A UI wants a peak
+  envelope it can draw, not a buffer it has to reduce itself — publishing the layout would pin
+  it to whatever the first consumer did with it. Deps: `hound` (WAV), `rtrb` (lock-free
+  queues), `anyhow`.
 - **`crates/app`** (`beat-forge` binary) — thin host layer: opens the `cpal` device, builds the
   output stream, reads stdin. Deps: `cpal`, `beat-forge-core`.
 
@@ -48,7 +52,9 @@ never mutexes. The module layout follows the same split: `sample.rs` loads and o
 the control thread, `engine.rs` renders it under real-time constraints, `lib.rs` holds the shared
 `Frame` type and the re-exports. Loading splits once more: `load_wav` only opens the file and hands
 a reader to `from_reader`, so the decoder — the half that faces untrusted input — is exercised over
-an in-memory `Cursor`, with no fixture files and no temp-file cleanup. The pair returned by
+an in-memory `Cursor`, with no fixture files and no temp-file cleanup. `Sample`'s fields are private
+because the type carries an invariant — `sample_rate` is always one `resample_to` can safely scale
+by — and public fields would make the check that establishes it optional. The pair returned by
 `engine()`:
 
 - `Engine` lives inside the cpal audio callback. `process(&mut [Frame])` advances one block: it

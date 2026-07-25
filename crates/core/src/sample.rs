@@ -17,7 +17,13 @@ use crate::Frame;
 /// would double the memory of the common case for nothing. An enum rather than a
 /// `channels: u16` field so the compiler forces every consumer to handle both layouts
 /// instead of trusting each one to compute the right stride.
-pub enum Frames {
+///
+/// Crate-private on purpose. This is the engine's storage layout, not a contract: a UI
+/// wants a peak envelope it can draw, not a buffer it has to reduce itself, so handing it
+/// out would pin the layout to whatever the first consumer did with it. Adding a
+/// multi-channel variant or moving to a flat interleaved buffer stays a local change while
+/// nothing outside can name the type.
+pub(crate) enum Frames {
     Mono(Vec<f32>),
     Stereo(Vec<Frame>),
 }
@@ -44,19 +50,38 @@ impl Frames {
 const RESAMPLE_HALF_TAPS: f64 = 16.0;
 
 /// A decoded audio sample.
+///
+/// The fields are private because the type carries an invariant: `sample_rate` is always one
+/// [`Sample::resample_to`] can safely scale by. That is checked once, where untrusted data
+/// enters, and public fields would make the check optional — a hand-built
+/// `Sample { sample_rate: 1, .. }` would walk straight past it and ask the resampler for
+/// hundreds of gigabytes. Construction therefore goes through [`Sample::load_wav`],
+/// [`Sample::from_reader`] or [`Sample::blip`], and every accessor below returns a `Copy`
+/// scalar, so nothing can desync the data from its declared rate afterwards either.
 pub struct Sample {
-    /// PCM data, nominally in [-1.0, 1.0].
-    pub frames: Frames,
-    /// Sample rate the data is *currently* at, in Hz — after any resampling.
-    pub sample_rate: u32,
-    /// Channel count of the source file, kept only so the host can warn about material
-    /// that was reduced on load.
-    pub source_channels: u16,
-    /// Sample rate of the source file, kept only so the host can report a conversion.
-    pub source_sample_rate: u32,
+    pub(crate) frames: Frames,
+    pub(crate) sample_rate: u32,
+    pub(crate) source_channels: u16,
+    pub(crate) source_sample_rate: u32,
 }
 
 impl Sample {
+    /// Sample rate the data is *currently* at, in Hz — after any resampling.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Channel count of the source file, kept only so the host can warn about material that
+    /// was reduced on load.
+    pub fn source_channels(&self) -> u16 {
+        self.source_channels
+    }
+
+    /// Sample rate of the source file, kept only so the host can report a conversion.
+    pub fn source_sample_rate(&self) -> u32 {
+        self.source_sample_rate
+    }
+
     /// Load a WAV file as f32 PCM, preserving mono/stereo layout.
     ///
     /// Files with more than two channels are truncated to the first two; a correct

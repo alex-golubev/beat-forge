@@ -16,7 +16,10 @@ mod engine;
 mod sample;
 
 pub use engine::{Engine, Trigger, engine};
-pub use sample::{Frames, Sample};
+pub use sample::Sample;
+
+/// Storage layout, shared with [`engine`] but not published: see [`sample::Frames`].
+pub(crate) use sample::Frames;
 
 /// One stereo frame: `[left, right]`.
 ///

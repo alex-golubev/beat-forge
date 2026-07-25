@@ -62,16 +62,17 @@ fn main() -> anyhow::Result<()> {
     // The engine reads one source frame per output frame, so anything not at the device's
     // rate would play at the wrong pitch. Converted here, once, off the audio thread.
     let sample = sample.resample_to(device_rate);
-    if sample.source_sample_rate != sample.sample_rate {
+    if sample.source_sample_rate() != sample.sample_rate() {
         println!(
             "Resampled {} Hz -> {} Hz",
-            sample.source_sample_rate, sample.sample_rate
+            sample.source_sample_rate(),
+            sample.sample_rate()
         );
     }
-    if sample.source_channels > 2 {
+    if sample.source_channels() > 2 {
         eprintln!(
             "warning: sample has {} channels — only the first two were kept",
-            sample.source_channels
+            sample.source_channels()
         );
     }
 
